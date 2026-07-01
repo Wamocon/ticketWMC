@@ -34,13 +34,16 @@ env:
 jobs:
   cancel_push_if_pr:
     name: Cancel push run if there is an open PR for the branch
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Check for open PR and cancel
         uses: actions/github-script@v6
         with:
           script: |
+            if (context.eventName !== 'push') {
+              core.info(`Not a push event (${context.eventName}); nothing to cancel.`);
+              return;
+            }
             const branch = context.ref.replace('refs/heads/', '');
             const prs = await github.rest.pulls.list({
               owner: context.repo.owner,
@@ -55,17 +58,19 @@ jobs:
               core.info('No open PR found; continuing with push run');
             }
 
-  check_run_preview:
-    name: Check whether to run preview
+  preview-deploy:
+    name: Vercel Preview Deployment
+    needs: cancel_push_if_pr
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'preview')
     runs-on: ubuntu-latest
-    outputs:
-      run_preview: ${{ steps.set_out.outputs.run_preview }}
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
 
-      - name: Decide preview run
-        id: set_out
+      - name: Decide preview deployment
+        id: decide_preview
         uses: actions/github-script@v6
         with:
           script: |
@@ -84,26 +89,10 @@ jobs:
                 head: `${context.repo.owner}:${branch}`,
                 state: 'open'
               });
-              if (prs.data && prs.data.length > 0) {
-                runPreview = 'false';
-              } else {
-                runPreview = 'true';
-              }
+              runPreview = prs.data && prs.data.length > 0 ? 'false' : 'true';
             }
             core.info(`Preview run: ${runPreview}`);
             core.setOutput('run_preview', runPreview);
-            return runPreview;
-
-  preview-deploy:
-    name: Vercel Preview Deployment
-    needs: check_run_preview
-    if: needs.check_run_preview.outputs.run_preview == 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'preview')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -114,6 +103,7 @@ jobs:
         run: npm install -g vercel@28 || true
 
       - name: Deploy to Vercel (Preview)
+        if: steps.decide_preview.outputs.run_preview == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
