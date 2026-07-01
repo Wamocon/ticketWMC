@@ -57,7 +57,6 @@ jobs:
 
   check_run_preview:
     name: Check whether to run preview
-    needs: cancel_push_if_pr
     runs-on: ubuntu-latest
     outputs:
       run_preview: ${{ steps.set_out.outputs.run_preview }}
