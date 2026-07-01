@@ -99,7 +99,7 @@ jobs:
           node-version: '18'
 
       - name: Install Vercel CLI
-        run: npm install -g vercel@28 || true
+        run: npm install -g vercel@latest
 
       - name: Deploy to Vercel (Preview)
         if: steps.decide_preview.outputs.run_preview == 'true'
@@ -115,7 +115,8 @@ jobs:
           else
             SCOPE=()
           fi
-          npx vercel --token "$VERCEL_TOKEN" --yes --name "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel link --yes --token "$VERCEL_TOKEN" --project "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel deploy --token "$VERCEL_TOKEN" --yes "${SCOPE[@]}"
 
   production-deploy:
     name: Vercel Production Deployment
@@ -133,7 +134,7 @@ jobs:
           node-version: '18'
 
       - name: Install Vercel CLI
-        run: npm install -g vercel@28 || true
+        run: npm install -g vercel@latest
 
       - name: Deploy to Vercel (Production)
         env:
@@ -148,4 +149,5 @@ jobs:
           else
             SCOPE=()
           fi
-          npx vercel --token "$VERCEL_TOKEN" --yes --prod --name "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel link --yes --token "$VERCEL_TOKEN" --project "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel deploy --token "$VERCEL_TOKEN" --yes --prod "${SCOPE[@]}"
