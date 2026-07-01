@@ -28,7 +28,7 @@ concurrency:
 
 env:
   VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_TEAM_ID: ${{ secrets.VERCEL_ORG_ID }}
   VERCEL_PROJECT_NAME: ${{ github.event.repository.name }}
 
 jobs:
@@ -105,16 +105,16 @@ jobs:
         if: steps.decide_preview.outputs.run_preview == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_NAME: ${{ github.event.repository.name }}
         run: |
           echo "Deploying preview for $VERCEL_PROJECT_NAME"
-          if [ -n "$VERCEL_ORG_ID" ]; then
-            SCOPE=(--scope "$VERCEL_ORG_ID")
+          if [ -n "$VERCEL_TEAM_ID" ]; then
+            SCOPE=(--scope "$VERCEL_TEAM_ID")
           else
             SCOPE=()
           fi
-          npx vercel --token "$VERCEL_TOKEN" --confirm --name "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel --token "$VERCEL_TOKEN" --yes --name "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
 
   production-deploy:
     name: Vercel Production Deployment
@@ -137,13 +137,13 @@ jobs:
       - name: Deploy to Vercel (Production)
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_NAME: ${{ github.event.repository.name }}
         run: |
           echo "Deploying production for $VERCEL_PROJECT_NAME (release ${{ github.event.release.tag_name }})"
-          if [ -n "$VERCEL_ORG_ID" ]; then
-            SCOPE=(--scope "$VERCEL_ORG_ID")
+          if [ -n "$VERCEL_TEAM_ID" ]; then
+            SCOPE=(--scope "$VERCEL_TEAM_ID")
           else
             SCOPE=()
           fi
-          npx vercel --token "$VERCEL_TOKEN" --confirm --prod --name "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel --token "$VERCEL_TOKEN" --yes --prod --name "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
