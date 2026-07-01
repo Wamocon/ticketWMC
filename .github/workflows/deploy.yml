@@ -1,0 +1,160 @@
+name: Reusable Vercel Deploy
+
+on:
+  workflow_call:
+    inputs:
+      vercel_env:
+        description: "Vercel environment"
+        required: false
+        type: string
+        default: "preview"
+      db_schema:
+        description: "Datenbank Schema"
+        required: false
+        type: string
+        default: "public"
+    secrets:
+      VERCEL_ORG_ID:
+        required: true
+      VERCEL_TOKEN:
+        required: true
+      ORG_PAT:
+        required: true
+      VERCEL_PROJECT_ID:
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy to Vercel (${{ inputs.vercel_env }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CI: "1"
+      FORCE_COLOR: "0"
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+    steps:
+      - name: Validate Secrets and Token Expiration
+        run: |
+          if [[ -z "${{ secrets.ORG_PAT }}" ]]; then
+            echo "::error::ORG_PAT ist nicht gesetzt. Bitte fügen Sie den ORG_PAT als Secret hinzu."
+            exit 1
+          fi
+          if [[ -z "${{ secrets.VERCEL_TOKEN }}" ]]; then
+            echo "::error::VERCEL_TOKEN ist nicht gesetzt. Bitte fügen Sie den VERCEL_TOKEN als Secret hinzu."
+            exit 1
+          fi
+          if [[ -z "${{ secrets.VERCEL_ORG_ID }}" ]]; then
+            echo "::error::VERCEL_ORG_ID ist nicht gesetzt. Bitte fügen Sie den VERCEL_ORG_ID als Secret hinzu."
+            exit 1
+          fi
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Sever Git Linkage
+        run: rm -rf .git
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Provision Vercel Project & Save Secret
+        if: env.VERCEL_PROJECT_ID == ''
+        env:
+          GH_TOKEN: ${{ secrets.ORG_PAT }}
+        run: |
+          echo "VERCEL_PROJECT_ID fehlt. Erstelle neues Vercel Projekt..."
+
+          # Derive a valid Vercel project name: lowercase repo name, only a-z0-9._-
+          PROJECT_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+          echo "Verwende Projektname: $PROJECT_NAME"
+
+          export GITHUB_ACTIONS=""
+          export GITHUB_REPOSITORY=""
+
+          vercel link --yes --project="$PROJECT_NAME" --token ${{ secrets.VERCEL_TOKEN }}
+
+          NEW_PROJECT_ID=$(grep -o '"projectId":"[^"]*' .vercel/project.json | grep -o '[^"]*$')
+
+          if [[ -z "$NEW_PROJECT_ID" ]]; then
+            echo "::error::Projekt-ID konnte nicht ausgelesen werden."
+            exit 1
+          fi
+
+          echo "Neues Vercel Projekt erstellt: $NEW_PROJECT_ID"
+
+          export GITHUB_REPOSITORY="${{ github.repository }}"
+          gh secret set VERCEL_PROJECT_ID --body "$NEW_PROJECT_ID" --repo "$GITHUB_REPOSITORY"
+
+          echo "VERCEL_PROJECT_ID=$NEW_PROJECT_ID" >> "$GITHUB_ENV"
+
+      - name: Pull Vercel environment
+        run: |
+          export GITHUB_ACTIONS=""
+          export GITHUB_REPOSITORY=""
+          vercel pull --yes --environment=${{ inputs.vercel_env }} --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Apply DB schema
+        run: |
+          SCHEMA="${{ inputs.db_schema }}"
+          if [[ -z "$SCHEMA" ]]; then
+            SCHEMA="public"
+          fi
+          echo "NEXT_PUBLIC_DB_SCHEMA=$SCHEMA" >> "$GITHUB_ENV"
+          echo "Datenbank-Schema gesetzt auf: $SCHEMA"
+
+      - name: Build project
+        run: |
+          export GITHUB_ACTIONS=""
+          export GITHUB_REPOSITORY=""
+          if [[ "${{ inputs.vercel_env }}" == "production" ]]; then
+            vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+          else
+            vercel build --token=${{ secrets.VERCEL_TOKEN }}
+          fi
+
+      - name: Deploy to Vercel
+        id: deploy
+        run: |
+          export GITHUB_ACTIONS=""
+          export GITHUB_REPOSITORY=""
+          set -euo pipefail
+
+          PROD_FLAG=""
+          [[ "${{ inputs.vercel_env }}" == "production" ]] && PROD_FLAG="--prod"
+
+          rm -f vercel-deploy.log
+          deploy_ok=false
+
+          if vercel deploy --prebuilt $PROD_FLAG --yes --archive=tgz --token=${{ secrets.VERCEL_TOKEN }} > vercel-deploy.log 2>&1; then
+            deploy_ok=true
+          fi
+
+          echo "=========================================="
+          echo " FULL VERCEL DEPLOY LOG"
+          echo "=========================================="
+          cat vercel-deploy.log || true
+          echo "=========================================="
+
+          if [[ "$deploy_ok" != "true" ]]; then
+            echo "### Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          DEPLOY_URL=$(grep -Eo 'https://[^[:space:]]+\.vercel\.app' vercel-deploy.log | sed 's/Building.*//' | grep -v '^$' | tail -n 1 || true)
+
+          if [[ -n "$DEPLOY_URL" ]]; then
+            echo "deploy_url=$DEPLOY_URL" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Deployed to Vercel"
+              echo "**Environment:** ${{ inputs.vercel_env }}"
+              echo "**Schema:** ${{ inputs.db_schema || 'public' }}"
+              echo "**URL:** $DEPLOY_URL"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
