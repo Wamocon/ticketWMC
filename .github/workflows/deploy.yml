@@ -70,14 +70,13 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
+            let runPreview = 'false';
             if (eventName === 'workflow_dispatch') {
               const env = github.context.payload.inputs && github.context.payload.inputs.environment;
-              return env === 'preview' ? 'true' : 'false';
-            }
-            if (eventName === 'pull_request') {
-              return 'true';
-            }
-            if (eventName === 'push') {
+              runPreview = env === 'preview' ? 'true' : 'false';
+            } else if (eventName === 'pull_request') {
+              runPreview = 'true';
+            } else if (eventName === 'push') {
               const branch = context.ref.replace('refs/heads/', '');
               const prs = await github.rest.pulls.list({
                 owner: context.repo.owner,
@@ -86,11 +85,13 @@ jobs:
                 state: 'open'
               });
               if (prs.data && prs.data.length > 0) {
-                return 'false';
+                runPreview = 'false';
+              } else {
+                runPreview = 'true';
               }
-              return 'true';
             }
-            return 'false';
+            core.info(`Preview run: ${runPreview}`);
+            core.setOutput('run_preview', runPreview);
 
   preview-deploy:
     name: Vercel Preview Deployment
