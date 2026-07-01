@@ -59,7 +59,7 @@ jobs:
     name: Check whether to run preview
     runs-on: ubuntu-latest
     outputs:
-      run_preview: ${{ steps.set_out.outputs.result }}
+      run_preview: ${{ steps.set_out.outputs.run_preview }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -92,6 +92,7 @@ jobs:
             }
             core.info(`Preview run: ${runPreview}`);
             core.setOutput('run_preview', runPreview);
+            return runPreview;
 
   preview-deploy:
     name: Vercel Preview Deployment
