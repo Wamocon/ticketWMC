@@ -59,7 +59,7 @@ jobs:
     name: Check whether to run preview
     runs-on: ubuntu-latest
     outputs:
-      run_preview: ${{ steps.set_out.outputs.run_preview }}
+      run_preview: ${{ steps.set_out.outputs.result }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,10 +72,10 @@ jobs:
             const eventName = context.eventName;
             if (eventName === 'workflow_dispatch') {
               const env = github.context.payload.inputs && github.context.payload.inputs.environment;
-              return { run_preview: env === 'preview' ? 'true' : 'false' };
+              return env === 'preview' ? 'true' : 'false';
             }
             if (eventName === 'pull_request') {
-              return { run_preview: 'true' };
+              return 'true';
             }
             if (eventName === 'push') {
               const branch = context.ref.replace('refs/heads/', '');
@@ -86,11 +86,11 @@ jobs:
                 state: 'open'
               });
               if (prs.data && prs.data.length > 0) {
-                return { run_preview: 'false' };
+                return 'false';
               }
-              return { run_preview: 'true' };
+              return 'true';
             }
-            return { run_preview: 'false' };
+            return 'false';
 
   preview-deploy:
     name: Vercel Preview Deployment
