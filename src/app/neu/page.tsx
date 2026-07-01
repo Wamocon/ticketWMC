@@ -1,0 +1,367 @@
+"use client";
+
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import Link from "next/link";
+import Script from "next/script";
+import {
+  TICKET_TYPES,
+  EXTRA_FIELDS,
+  FALLBACK_PRIORITIES,
+  isTicketGroup,
+  type SelectOption,
+} from "@/lib/ticketTypes";
+
+// Turnstile ist optional: nur aktiv, wenn ein Sitekey gesetzt ist.
+// Ohne NEXT_PUBLIC_TURNSTILE_SITEKEY läuft das Formular ohne Captcha (lokal praktisch).
+const SITEKEY = process.env.NEXT_PUBLIC_TURNSTILE_SITEKEY ?? "";
+const TURNSTILE_ENABLED = SITEKEY.length > 0;
+
+declare global {
+  interface Window {
+    turnstile?: {
+      getResponse: (widgetId?: string) => string | undefined;
+      reset: (widgetId?: string) => void;
+    };
+  }
+}
+
+type Msg = { type: "success" | "error"; node: ReactNode } | null;
+
+export default function NewTicketPage() {
+  const [selectedType, setSelectedType] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [msg, setMsg] = useState<Msg>(null);
+  const [labels, setLabels] = useState<string[]>([]);
+  const [priorities, setPriorities] = useState<SelectOption[]>(FALLBACK_PRIORITIES);
+
+  // Auswahldaten (bestehende Stichwörter + Prioritäten) laden.
+  useEffect(() => {
+    let active = true;
+    fetch("/api/meta")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!active || !d) return;
+        if (Array.isArray(d.labels)) setLabels(d.labels);
+        if (Array.isArray(d.priorities) && d.priorities.length) setPriorities(d.priorities);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setMsg(null);
+    const form = e.currentTarget;
+    const fd = new FormData(form);
+
+    const tokenField = fd.get("cf-turnstile-response");
+    const turnstileToken =
+      (typeof tokenField === "string" && tokenField) ||
+      window.turnstile?.getResponse() ||
+      "";
+
+    const type = (fd.get("type") as string) || "";
+
+    // Typ-spezifische Auswahlfelder einsammeln (+ Pflicht-Check).
+    const customFields: Record<string, string | string[]> = {};
+    if (isTicketGroup(type)) {
+      for (const field of EXTRA_FIELDS[type]) {
+        if (field.multiple) {
+          const values = fd.getAll(field.name).map((v) => v.toString());
+          if (field.required && values.length === 0) {
+            return setMsg({ type: "error", node: `Bitte „${field.label}" auswählen.` });
+          }
+          if (values.length) customFields[field.name] = values;
+        } else {
+          const value = (fd.get(field.name) as string) || "";
+          if (field.required && !value) {
+            return setMsg({ type: "error", node: `Bitte „${field.label}" auswählen.` });
+          }
+          if (value) customFields[field.name] = value;
+        }
+      }
+    }
+
+    const payload = {
+      type,
+      summary: ((fd.get("summary") as string) || "").trim(),
+      description: ((fd.get("description") as string) || "").trim(),
+      component: ((fd.get("component") as string) || "").trim(),
+      priority: (fd.get("priority") as string) || "",
+      customFields,
+      reporterName: ((fd.get("reporterName") as string) || "").trim(),
+      reporterEmail: ((fd.get("reporterEmail") as string) || "").trim(),
+      turnstileToken,
+    };
+
+    if (!payload.type) return setMsg({ type: "error", node: "Bitte eine Art des Anliegens wählen." });
+    if (!payload.summary) return setMsg({ type: "error", node: "Bitte einen Titel eingeben." });
+    if (TURNSTILE_ENABLED && !payload.turnstileToken)
+      return setMsg({ type: "error", node: "Bitte die Sicherheitsprüfung (Captcha) abschließen." });
+
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        key?: string;
+        jiraUrl?: string;
+        error?: string;
+        warning?: string;
+      };
+      if (!res.ok) throw new Error(data.error || `Fehler ${res.status}`);
+
+      setMsg({
+        type: "success",
+        node: (
+          <>
+            ✅ Ticket <strong>{data.key}</strong> wurde angelegt.{" "}
+            <a
+              href={data.jiraUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold underline"
+            >
+              In Jira öffnen
+            </a>{" "}
+            ·{" "}
+            <Link href="/" className="font-semibold underline">
+              zum Liveticker
+            </Link>
+            {data.warning && <span className="mt-1 block text-amber-700">⚠ {data.warning}</span>}
+          </>
+        ),
+      });
+      form.reset();
+      setSelectedType("");
+      window.turnstile?.reset();
+    } catch (err) {
+      setMsg({
+        type: "error",
+        node: "❌ " + (err instanceof Error ? err.message : "Konnte nicht angelegt werden."),
+      });
+      window.turnstile?.reset();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      {TURNSTILE_ENABLED && (
+        <Script
+          src="https://challenges.cloudflare.com/turnstile/v0/api.js"
+          strategy="afterInteractive"
+        />
+      )}
+
+      <div className="mx-auto max-w-2xl rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-5 text-xl font-semibold">Neues Ticket melden</h2>
+
+        <form onSubmit={handleSubmit} className="space-y-5">
+          {/* Typ-Auswahl */}
+          <fieldset>
+            <legend className="mb-2 block text-sm font-semibold">Art des Anliegens</legend>
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+              {TICKET_TYPES.map((t) => {
+                const active = selectedType === t.key;
+                return (
+                  <label
+                    key={t.key}
+                    className={`cursor-pointer rounded-lg border-2 p-3 text-center transition ${
+                      active
+                        ? t.accentSelected
+                        : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-700"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="type"
+                      value={t.key}
+                      checked={active}
+                      onChange={() => setSelectedType(t.key)}
+                      className="sr-only"
+                    />
+                    <span className="block text-sm font-semibold">
+                      {t.emoji} {t.formTitle}
+                    </span>
+                    <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
+                      {t.formDesc}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+
+          <Field label="Titel" hint="(kurz und prägnant)">
+            <input
+              type="text"
+              name="summary"
+              maxLength={255}
+              required
+              placeholder="z. B. Exportfunktion für Berichte"
+              className={inputClass}
+            />
+          </Field>
+
+          <Field label="Beschreibung" hint="(optional, aber hilfreich)">
+            <textarea
+              name="description"
+              maxLength={5000}
+              rows={5}
+              placeholder="Worum geht es? Bei Fehlern: Schritte zum Nachstellen, erwartetes vs. tatsächliches Verhalten."
+              className={`${inputClass} resize-y`}
+            />
+          </Field>
+
+          {/* Komponente: bestehende Stichwörter als Vorschläge + freie Eingabe */}
+          <Field label="Komponente" hint="(Service / App / Vorgehen – bestehend wählen oder neu eingeben)">
+            <input
+              type="text"
+              name="component"
+              list="component-list"
+              aria-label="Komponente"
+              maxLength={120}
+              placeholder="z. B. cati, backend, Anforderungsportal …"
+              className={inputClass}
+            />
+            <datalist id="component-list">
+              {labels.map((l) => (
+                <option key={l} value={l} />
+              ))}
+            </datalist>
+          </Field>
+
+          <Field label="Priorität" hint="(optional)">
+            <select name="priority" aria-label="Priorität" className={inputClass} defaultValue="">
+              <option value="">— keine —</option>
+              {priorities.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {/* Typ-spezifische Felder (z. B. Fehlertyp/Fehlerklasse/Umgebung beim Fehler) */}
+          {isTicketGroup(selectedType) &&
+            EXTRA_FIELDS[selectedType].map((field) =>
+              field.multiple ? (
+                <fieldset key={field.name}>
+                  <legend className="mb-1.5 block text-sm font-semibold">
+                    {field.label}{" "}
+                    <span className="font-normal text-zinc-500 dark:text-zinc-400">
+                      {field.required ? "(erforderlich)" : "(optional, Mehrfachauswahl)"}
+                    </span>
+                  </legend>
+                  <div className="flex flex-wrap gap-3">
+                    {field.options.map((o) => (
+                      <label key={o.id} className="inline-flex items-center gap-2 text-sm">
+                        <input type="checkbox" name={field.name} value={o.id} className="h-4 w-4" />
+                        {o.label}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              ) : (
+                <Field
+                  key={field.name}
+                  label={field.label}
+                  hint={field.required ? "(erforderlich)" : "(optional)"}
+                >
+                  <select
+                    name={field.name}
+                    aria-label={field.label}
+                    required={field.required}
+                    className={inputClass}
+                    defaultValue=""
+                  >
+                    <option value="">— bitte wählen —</option>
+                    {field.options.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              ),
+            )}
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="Dein Name" hint="(optional)">
+              <input
+                type="text"
+                name="reporterName"
+                aria-label="Dein Name"
+                maxLength={120}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="Deine E-Mail" hint="(optional)">
+              <input
+                type="email"
+                name="reporterEmail"
+                aria-label="Deine E-Mail"
+                maxLength={120}
+                className={inputClass}
+              />
+            </Field>
+          </div>
+
+          {TURNSTILE_ENABLED && (
+            <div className="cf-turnstile" data-sitekey={SITEKEY} data-theme="auto" />
+          )}
+
+          <button
+            type="submit"
+            disabled={submitting}
+            className="rounded-full bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {submitting ? "Wird angelegt…" : "Ticket anlegen"}
+          </button>
+
+          {msg && (
+            <div
+              className={`rounded-lg px-4 py-3 text-sm ${
+                msg.type === "success"
+                  ? "border border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
+                  : "border border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+              }`}
+            >
+              {msg.node}
+            </div>
+          )}
+        </form>
+      </div>
+    </>
+  );
+}
+
+const inputClass =
+  "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-sm font-semibold">
+        {label}{" "}
+        {hint && <span className="font-normal text-zinc-500 dark:text-zinc-400">{hint}</span>}
+      </span>
+      {children}
+    </label>
+  );
+}
