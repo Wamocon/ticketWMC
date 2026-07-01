@@ -60,7 +60,6 @@ jobs:
 
   preview-deploy:
     name: Vercel Preview Deployment
-    needs: cancel_push_if_pr
     if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'preview')
     runs-on: ubuntu-latest
     steps:
