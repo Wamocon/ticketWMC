@@ -1,0 +1,49 @@
+name: Vercel Production Deploy
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag to deploy (optional, defaults to release tag)'
+        required: false
+        default: ''
+
+concurrency:
+  group: "deploy-production-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  production-deploy:
+    name: Vercel Production Deployment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.event.release.tag_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Deploy to Vercel (Production)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_NAME: ${{ github.event.repository.name }}
+        run: |
+          VERCEL_PROJECT_NAME="${VERCEL_PROJECT_NAME,,}"
+          echo "Deploying production for $VERCEL_PROJECT_NAME (release ${{ github.event.release.tag_name }})"
+          if [ -n "$VERCEL_TEAM_ID" ]; then
+            SCOPE=(--scope "$VERCEL_TEAM_ID")
+          else
+            SCOPE=()
+          fi
+          npx vercel link --yes --token "$VERCEL_TOKEN" --project "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel deploy --token "$VERCEL_TOKEN" --yes --prod "${SCOPE[@]}"

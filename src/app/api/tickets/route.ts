@@ -19,6 +19,7 @@ import {
   type TicketGroup,
 } from "@/lib/ticketTypes";
 import { rateLimit, clientIp } from "@/lib/rateLimit";
+import { isRealProduction } from "@/lib/env";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -144,7 +145,7 @@ export async function POST(req: NextRequest) {
           { status: 403 },
         );
       }
-    } else if (process.env.NODE_ENV === "production") {
+    } else if (isRealProduction()) {
       return NextResponse.json(
         { error: "Captcha ist serverseitig nicht konfiguriert" },
         { status: 403 },

@@ -1,35 +1,20 @@
-name: Vercel Deploy
+name: Vercel Preview Deploy
 
 on:
   push:
     branches: ['**']
   pull_request:
     types: [opened, synchronize, reopened]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Choose environment to deploy'
-        required: true
-        default: 'preview'
-        type: choice
-        options:
-          - preview
-          - production
       ref:
-        description: 'Branch or tag to deploy (optional). For production provide tag.'
+        description: 'Branch to deploy (optional, defaults to current ref)'
         required: false
         default: ''
 
 concurrency:
-  group: "deploy-${{ github.ref }}"
+  group: "deploy-preview-${{ github.ref }}"
   cancel-in-progress: true
-
-env:
-  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-  VERCEL_TEAM_ID: ${{ secrets.VERCEL_ORG_ID }}
-  VERCEL_PROJECT_NAME: ${{ github.event.repository.name }}
 
 jobs:
   cancel_push_if_pr:
@@ -60,7 +45,6 @@ jobs:
 
   preview-deploy:
     name: Vercel Preview Deployment
-    if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'preview')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -74,13 +58,8 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            let runPreview = 'false';
-            if (eventName === 'workflow_dispatch') {
-              const env = github.context.payload.inputs && github.context.payload.inputs.environment;
-              runPreview = env === 'preview' ? 'true' : 'false';
-            } else if (eventName === 'pull_request') {
-              runPreview = 'true';
-            } else if (eventName === 'push') {
+            let runPreview = 'true';
+            if (eventName === 'push') {
               const branch = context.ref.replace('refs/heads/', '');
               const prs = await github.rest.pulls.list({
                 owner: context.repo.owner,
@@ -117,37 +96,3 @@ jobs:
           fi
           npx vercel link --yes --token "$VERCEL_TOKEN" --project "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
           npx vercel deploy --token "$VERCEL_TOKEN" --yes "${SCOPE[@]}"
-
-  production-deploy:
-    name: Vercel Production Deployment
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.event.release.tag_name }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install Vercel CLI
-        run: npm install -g vercel@latest
-
-      - name: Deploy to Vercel (Production)
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_NAME: ${{ github.event.repository.name }}
-        run: |
-          VERCEL_PROJECT_NAME="${VERCEL_PROJECT_NAME,,}"
-          echo "Deploying production for $VERCEL_PROJECT_NAME (release ${{ github.event.release.tag_name }})"
-          if [ -n "$VERCEL_TEAM_ID" ]; then
-            SCOPE=(--scope "$VERCEL_TEAM_ID")
-          else
-            SCOPE=()
-          fi
-          npx vercel link --yes --token "$VERCEL_TOKEN" --project "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
-          npx vercel deploy --token "$VERCEL_TOKEN" --yes --prod "${SCOPE[@]}"

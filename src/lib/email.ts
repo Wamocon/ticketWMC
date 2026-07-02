@@ -1,6 +1,8 @@
 // Versand der Login-Magic-Link-Mail über Resend.
-// Fehlt RESEND_API_KEY: in Production harter Fehler (fail closed), im Dev-Modus
+// Fehlt RESEND_API_KEY: in echter Produktion harter Fehler (fail closed), sonst
 // wird der Link nur geloggt und an den Aufrufer zurückgegeben (kein Postfach nötig).
+
+import { isRealProduction } from "@/lib/env";
 
 export interface SendMagicLinkResult {
   ok: boolean;
@@ -13,7 +15,7 @@ export async function sendMagicLinkEmail(params: { to: string; link: string }): 
   const from = process.env.AUTH_FROM_EMAIL;
 
   if (!apiKey) {
-    if (process.env.NODE_ENV === "production") {
+    if (isRealProduction()) {
       console.error("[auth] RESEND_API_KEY fehlt – Magic-Link-Versand in Produktion nicht möglich.");
       return { ok: false };
     }
