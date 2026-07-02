@@ -94,6 +94,7 @@ interface JiraIssue {
     issuetype?: { name?: string };
     priority?: { name?: string } | null;
     labels?: string[];
+    components?: Array<{ id?: string; name?: string }>;
     assignee?: { displayName?: string } | null;
     reporter?: { displayName?: string } | null;
     created?: string;
@@ -192,7 +193,10 @@ export function mapIssueToTicket(issue: JiraIssue, baseUrl: string): Ticket {
     status: f.status?.name ?? "",
     statusCategory: f.status?.statusCategory?.key ?? "",
     priority: f.priority?.name ?? null,
-    components: Array.isArray(f.labels) ? f.labels : [],
+    components: Array.isArray(f.components)
+      ? f.components.map((c) => c.name).filter((n): n is string => Boolean(n))
+      : [],
+    labels: Array.isArray(f.labels) ? f.labels : [],
     fehlertyp: optionValue(f[FIELD_FEHLERTYP]),
     fehlerklasse: optionValue(f[FIELD_FEHLERKLASSE]),
     umgebung: optionArrayValues(f[FIELD_UMGEBUNG]),
@@ -211,6 +215,7 @@ export const SEARCH_FIELDS = [
   "issuetype",
   "priority",
   "labels",
+  "components",
   "created",
   "updated",
   "assignee",
@@ -236,9 +241,10 @@ export async function updateIssue(key: string, fields: Record<string, unknown>):
   }
 }
 
-// ── Meta: bestehende Stichwörter und Prioritäten (mit kurzem Cache) ──
+// ── Meta: bestehende Stichwörter, Prioritäten und Komponenten (mit kurzem Cache) ──
 let labelCache: { values: string[]; at: number } | null = null;
 let priorityCache: { values: SelectOption[]; at: number } | null = null;
+let componentCache: { values: SelectOption[]; at: number } | null = null;
 const CACHE_MS = 5 * 60 * 1000;
 
 /** Alle existierenden Stichwörter (paginiert), für die Komponenten-Combobox. */
@@ -277,4 +283,61 @@ export async function getPriorities(): Promise<SelectOption[]> {
     .map((p) => ({ id: p.id, label: p.name }));
   priorityCache = { values, at: Date.now() };
   return values;
+}
+
+/** Prüft per Jira-User-Suche, ob die E-Mail zu einem existierenden User gehört (fürs Login). */
+export async function searchUserByEmail(email: string): Promise<boolean> {
+  const res = await jiraFetch(`/rest/api/3/user/search?query=${encodeURIComponent(email)}`);
+  if (!res.ok) {
+    throw new JiraError(`Jira-User-Suche fehlgeschlagen (${res.status})`, res.status, await safeText(res));
+  }
+  const users = (await res.json()) as Array<{ emailAddress?: string }>;
+  const needle = email.trim().toLowerCase();
+  return users.some((u) => (u.emailAddress ?? "").toLowerCase() === needle);
+}
+
+/** Bestehende Jira-Project-Components (echtes Components-Feld, nicht Labels). */
+export async function getComponents(forceRefresh = false): Promise<SelectOption[]> {
+  if (!forceRefresh && componentCache && Date.now() - componentCache.at < CACHE_MS) {
+    return componentCache.values;
+  }
+  const { projectKey } = getJiraConfig();
+  const res = await jiraFetch(`/rest/api/2/project/${encodeURIComponent(projectKey)}/components`);
+  if (!res.ok) {
+    throw new JiraError(`Komponenten laden fehlgeschlagen (${res.status})`, res.status, await safeText(res));
+  }
+  const raw = (await res.json()) as Array<{ id: string; name: string }>;
+  const values = raw
+    .map((c) => ({ id: c.id, label: c.name }))
+    .sort((a, b) => a.label.localeCompare(b.label, "de"));
+  componentCache = { values, at: Date.now() };
+  return values;
+}
+
+/**
+ * Findet eine Component per Name (case-insensitiv) oder legt sie in Jira neu an
+ * (POST /rest/api/2/component – erfordert i. d. R. "Administer Projects" für den
+ * Service-Account). Bei Konflikt durch eine parallele Anfrage wird erneut gesucht,
+ * statt hart zu scheitern.
+ */
+export async function findOrCreateComponent(name: string): Promise<SelectOption> {
+  const needle = name.trim().toLowerCase();
+  const existing = (await getComponents()).find((c) => c.label.toLowerCase() === needle);
+  if (existing) return existing;
+
+  const { projectKey } = getJiraConfig();
+  const res = await jiraFetch("/rest/api/2/component", {
+    method: "POST",
+    body: { name: name.trim(), project: projectKey },
+  });
+  if (res.ok) {
+    const created = (await res.json()) as { id: string; name: string };
+    componentCache = null;
+    return { id: created.id, label: created.name };
+  }
+
+  const retry = (await getComponents(true)).find((c) => c.label.toLowerCase() === needle);
+  if (retry) return retry;
+
+  throw new JiraError(`Komponente anlegen fehlgeschlagen (${res.status})`, res.status, await safeText(res));
 }

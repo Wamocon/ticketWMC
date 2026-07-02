@@ -164,7 +164,8 @@ export interface Ticket {
   status: string;
   statusCategory: string; // new | indeterminate | done
   priority: string | null;
-  components: string[]; // = Jira-Stichwörter (Komponente)
+  components: string[]; // echte Jira-Project-Components
+  labels: string[]; // freie Jira-Stichwörter
   fehlertyp: string | null;
   fehlerklasse: string | null;
   umgebung: string[];

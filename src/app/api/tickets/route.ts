@@ -5,6 +5,7 @@ import {
   createIssue,
   updateIssue,
   mapIssueToTicket,
+  findOrCreateComponent,
   JiraError,
   SEARCH_FIELDS,
 } from "@/lib/jira";
@@ -17,6 +18,7 @@ import {
   type Ticket,
   type TicketGroup,
 } from "@/lib/ticketTypes";
+import { rateLimit, clientIp } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,23 +26,6 @@ export const dynamic = "force-dynamic";
 const MAX_SUMMARY = 255;
 const MAX_DESCRIPTION = 5000;
 const MAX_NAME = 120;
-
-// ── einfacher In-Memory-Rate-Limiter (bewusst ohne DB) ──────────
-// Wird bei Cold-Start zurückgesetzt → Turnstile bleibt die primäre Hürde.
-const rateBuckets = new Map<string, { count: number; resetAt: number }>();
-function rateLimit(ip: string, limit = 5, windowMs = 60_000) {
-  const now = Date.now();
-  const bucket = rateBuckets.get(ip);
-  if (!bucket || now > bucket.resetAt) {
-    rateBuckets.set(ip, { count: 1, resetAt: now + windowMs });
-    return { ok: true as const };
-  }
-  bucket.count += 1;
-  if (bucket.count > limit) {
-    return { ok: false as const, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
-  }
-  return { ok: true as const };
-}
 
 async function verifyTurnstile(token: string, ip: string) {
   const secret = process.env.TURNSTILE_SECRET;
@@ -62,12 +47,6 @@ async function verifyTurnstile(token: string, ip: string) {
     "error-codes"?: string[];
   };
   return { ok: data.success === true, reason: (data["error-codes"] ?? []).join(", ") };
-}
-
-function clientIp(req: NextRequest): string {
-  const fwd = req.headers.get("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0].trim();
-  return req.headers.get("x-real-ip") ?? "unknown";
 }
 
 function handleError(err: unknown): NextResponse {
@@ -116,8 +95,12 @@ interface TicketPayload {
   description?: string;
   /** Typ-spezifische Auswahlfelder, z. B. { fehlertyp: "10195", umgebung: ["10417"] } */
   customFields?: Record<string, string | string[]>;
-  /** Komponente = Jira-Stichwort */
-  component?: string;
+  /** Freies Jira-Stichwort (Labels) */
+  label?: string;
+  /** ID einer bestehenden Jira-Component */
+  componentId?: string;
+  /** Name einer neu anzulegenden Jira-Component (Alternative zu componentId) */
+  newComponentName?: string;
   /** System-Prioritäts-ID */
   priority?: string;
   reporterName?: string;
@@ -143,7 +126,9 @@ export async function POST(req: NextRequest) {
     const summary = (body.summary ?? "").trim();
     const description = (body.description ?? "").trim();
     const customFields = body.customFields ?? {};
-    const component = (body.component ?? "").trim();
+    const label = (body.label ?? "").trim();
+    const componentId = (body.componentId ?? "").trim();
+    const newComponentName = (body.newComponentName ?? "").trim();
     const priorityId = (body.priority ?? "").trim();
     const reporterName = (body.reporterName ?? "").trim();
     const reporterEmail = (body.reporterEmail ?? "").trim();
@@ -231,6 +216,21 @@ export async function POST(req: NextRequest) {
         : { id: values[0] };
     }
 
+    // Komponente vorab auflösen (ggf. in Jira neu anlegen). Schlägt das fehl
+    // (z. B. fehlende Berechtigung), wird nur eine Warnung gemeldet – die
+    // Ticket-Anlage selbst wird dadurch nicht blockiert.
+    let resolvedComponentId = componentId || undefined;
+    let componentWarning: string | undefined;
+    if (!resolvedComponentId && newComponentName) {
+      try {
+        const comp = await findOrCreateComponent(newComponentName);
+        resolvedComponentId = comp.id;
+      } catch (e) {
+        console.error("[api/tickets] Komponente anlegen fehlgeschlagen:", e);
+        componentWarning = "Neue Komponente konnte nicht angelegt werden.";
+      }
+    }
+
     const created = await createIssue({
       projectKey,
       issueTypeName: GROUP_TO_JIRA_TYPE[group],
@@ -238,20 +238,23 @@ export async function POST(req: NextRequest) {
       extraFields,
     });
 
-    // Komponente (Stichwort) und Priorität liegen nicht auf allen Erstellen-
-    // Masken → per Update nachsetzen. Schlägt das fehl, ist der Vorgang
-    // trotzdem angelegt; wir melden es als Warnung.
+    // Label, Komponente und Priorität liegen nicht auf allen Erstellen-Masken
+    // → per Update nachsetzen. Schlägt das fehl, ist der Vorgang trotzdem
+    // angelegt; wir melden es als Warnung.
     const updateFields: Record<string, unknown> = {};
-    if (component) updateFields.labels = [sanitizeLabel(component)];
+    if (label) updateFields.labels = [sanitizeLabel(label)];
+    if (resolvedComponentId) updateFields.components = [{ id: resolvedComponentId }];
     if (priorityId) updateFields.priority = { id: priorityId };
 
-    let warning: string | undefined;
+    let warning = componentWarning;
     if (Object.keys(updateFields).length > 0) {
       try {
         await updateIssue(created.key, updateFields);
       } catch (e) {
-        console.error("[api/tickets] Nachsetzen von Komponente/Priorität fehlgeschlagen:", e);
-        warning = "Vorgang angelegt, aber Komponente/Priorität konnten nicht gesetzt werden.";
+        console.error("[api/tickets] Nachsetzen von Label/Komponente/Priorität fehlgeschlagen:", e);
+        warning = [warning, "Vorgang angelegt, aber Label/Komponente/Priorität konnten nicht gesetzt werden."]
+          .filter(Boolean)
+          .join(" ");
       }
     }
 
