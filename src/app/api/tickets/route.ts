@@ -19,7 +19,6 @@ import {
   type TicketGroup,
 } from "@/lib/ticketTypes";
 import { rateLimit, clientIp } from "@/lib/rateLimit";
-import { isRealProduction } from "@/lib/env";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -136,7 +135,11 @@ export async function POST(req: NextRequest) {
     const turnstileToken = body.turnstileToken ?? "";
 
     // Turnstile ist optional: nur prüfen, wenn ein Secret konfiguriert ist.
-    // Ohne Secret → in Produktion abweisen (fail closed), lokal überspringen.
+    // Fehlt es, wird nur gewarnt statt abzuweisen – die App liegt inzwischen
+    // ohnehin hinter dem Login (Middleware/Proxy), das ursprüngliche Bot-Spam-
+    // Risiko eines offenen, unauthentifizierten Formulars entfällt dadurch
+    // größtenteils. Bewusste, befristete Entscheidung, bis Turnstile bei
+    // Bedarf richtig eingerichtet wird.
     if (process.env.TURNSTILE_SECRET) {
       const captcha = await verifyTurnstile(turnstileToken, ip);
       if (!captcha.ok) {
@@ -145,15 +148,8 @@ export async function POST(req: NextRequest) {
           { status: 403 },
         );
       }
-    } else if (isRealProduction()) {
-      return NextResponse.json(
-        { error: "Captcha ist serverseitig nicht konfiguriert" },
-        { status: 403 },
-      );
     } else {
-      console.warn(
-        "[api/tickets] TURNSTILE_SECRET fehlt – Captcha im Dev-Modus übersprungen.",
-      );
+      console.warn("[api/tickets] TURNSTILE_SECRET fehlt – Captcha-Prüfung übersprungen.");
     }
 
     if (!isTicketGroup(type)) {
