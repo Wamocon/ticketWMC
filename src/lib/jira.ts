@@ -292,8 +292,17 @@ export async function searchUserByEmail(email: string): Promise<boolean> {
     throw new JiraError(`Jira-User-Suche fehlgeschlagen (${res.status})`, res.status, await safeText(res));
   }
   const users = (await res.json()) as Array<{ emailAddress?: string }>;
+  if (users.length === 0) return false;
+
   const needle = email.trim().toLowerCase();
-  return users.some((u) => (u.emailAddress ?? "").toLowerCase() === needle);
+  if (users.some((u) => (u.emailAddress ?? "").toLowerCase() === needle)) return true;
+
+  // Manche Jira-User verstecken ihre E-Mail per Profil-Datenschutzeinstellung –
+  // dann liefert Jira `emailAddress: ""`, obwohl die Suche selbst schon intern
+  // gegen die (verborgene) E-Mail gematcht hat (sonst käme dieser eine Treffer
+  // gar nicht zurück). Bei genau einem Ergebnis ohne emailAddress werten wir
+  // das daher als Treffer.
+  return users.length === 1 && !users[0].emailAddress;
 }
 
 /** Bestehende Jira-Project-Components (echtes Components-Feld, nicht Labels). */
