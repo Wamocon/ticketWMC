@@ -61,6 +61,11 @@ export function TicketCard({
               # {c}
             </Badge>
           ))}
+          {ticket.labels.map((l) => (
+            <Badge key={l} className="bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">
+              🏷 {l}
+            </Badge>
+          ))}
           {ticket.umgebung.map((u) => (
             <Badge key={u} className="bg-teal-100 text-teal-700 dark:bg-teal-950/50 dark:text-teal-300">
               {u}

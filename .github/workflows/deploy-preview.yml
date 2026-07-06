@@ -1,0 +1,98 @@
+name: Vercel Preview Deploy
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch to deploy (optional, defaults to current ref)'
+        required: false
+        default: ''
+
+concurrency:
+  group: "deploy-preview-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  cancel_push_if_pr:
+    name: Cancel push run if there is an open PR for the branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for open PR and cancel
+        uses: actions/github-script@v6
+        with:
+          script: |
+            if (context.eventName !== 'push') {
+              core.info(`Not a push event (${context.eventName}); nothing to cancel.`);
+              return;
+            }
+            const branch = context.ref.replace('refs/heads/', '');
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${branch}`,
+              state: 'open'
+            });
+            if (prs.data && prs.data.length > 0) {
+              core.info(`Open PR exists for ${branch}, cancelling this push run in favor of the pull_request event`);
+              await github.rest.actions.cancelWorkflowRun({ owner: context.repo.owner, repo: context.repo.repo, run_id: parseInt(process.env.GITHUB_RUN_ID) });
+            } else {
+              core.info('No open PR found; continuing with push run');
+            }
+
+  preview-deploy:
+    name: Vercel Preview Deployment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
+
+      - name: Decide preview deployment
+        id: decide_preview
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const eventName = context.eventName;
+            let runPreview = 'true';
+            if (eventName === 'push') {
+              const branch = context.ref.replace('refs/heads/', '');
+              const prs = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: `${context.repo.owner}:${branch}`,
+                state: 'open'
+              });
+              runPreview = prs.data && prs.data.length > 0 ? 'false' : 'true';
+            }
+            core.info(`Preview run: ${runPreview}`);
+            core.setOutput('run_preview', runPreview);
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Deploy to Vercel (Preview)
+        if: steps.decide_preview.outputs.run_preview == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_NAME: ${{ github.event.repository.name }}
+        run: |
+          VERCEL_PROJECT_NAME="${VERCEL_PROJECT_NAME,,}"
+          echo "Deploying preview for $VERCEL_PROJECT_NAME"
+          if [ -n "$VERCEL_TEAM_ID" ]; then
+            SCOPE=(--scope "$VERCEL_TEAM_ID")
+          else
+            SCOPE=()
+          fi
+          npx vercel link --yes --token "$VERCEL_TOKEN" --project "$VERCEL_PROJECT_NAME" "${SCOPE[@]}"
+          npx vercel deploy --token "$VERCEL_TOKEN" --yes "${SCOPE[@]}"
