@@ -95,6 +95,8 @@ interface TicketPayload {
   description?: string;
   /** Typ-spezifische Auswahlfelder, z. B. { fehlertyp: "10195", umgebung: ["10417"] } */
   customFields?: Record<string, string | string[]>;
+  /** Nur bei "fehler": abweichendes Zielprojekt statt des Default-Projekts */
+  targetProjectKey?: string;
   /** Freies Jira-Stichwort (Labels) */
   label?: string;
   /** ID einer bestehenden Jira-Component */
@@ -126,6 +128,7 @@ export async function POST(req: NextRequest) {
     const summary = (body.summary ?? "").trim();
     const description = (body.description ?? "").trim();
     const customFields = body.customFields ?? {};
+    const targetProjectKey = (body.targetProjectKey ?? "").trim();
     const label = (body.label ?? "").trim();
     const componentId = (body.componentId ?? "").trim();
     const newComponentName = (body.newComponentName ?? "").trim();
@@ -170,6 +173,13 @@ export async function POST(req: NextRequest) {
 
     const group = type as TicketGroup;
 
+    // Nur "fehler" darf in ein abweichendes Projekt umgeleitet werden. Hat
+    // das Zielprojekt nicht dieselben Custom-Fields wie das Default-Projekt
+    // (z. B. Fehlertyp/Fehlerklasse), werden diese unten als Text in die
+    // Beschreibung gefaltet statt als Custom-Field übertragen.
+    const effectiveProjectKey = group === "fehler" && targetProjectKey ? targetProjectKey : projectKey;
+    const isDefaultProject = effectiveProjectKey === projectKey;
+
     // Freitext zusammenbauen (inkl. optionaler Melder-Angaben).
     let fullDescription = description;
     if (reporterName || reporterEmail) {
@@ -179,14 +189,14 @@ export async function POST(req: NextRequest) {
       ]
         .filter(Boolean)
         .join(" | ");
-      fullDescription = `${description}\n\n— Gemeldet über WMC-Ticketsystem (${meta})`;
+      fullDescription = `${fullDescription}\n\n— Gemeldet über WMC-Ticketsystem (${meta})`;
     }
 
-    // Jira-konforme Felder je Typ aufbauen.
+    // Jira-konforme Felder je Typ aufbauen. Im Default-Projekt strukturiert
+    // als Custom-Fields; in einem abweichenden Zielprojekt (das diese Felder
+    // nicht hat) stattdessen als lesbarer Text in die Beschreibung gefaltet.
     const extraFields: Record<string, unknown> = {};
-    if (fullDescription) {
-      extraFields[DESCRIPTION_FIELD[group]] = fullDescription;
-    }
+    const foldedLines: string[] = [];
     for (const fieldDef of EXTRA_FIELDS[group]) {
       const raw = customFields[fieldDef.name];
       const values = (Array.isArray(raw) ? raw : raw ? [raw] : [])
@@ -194,7 +204,7 @@ export async function POST(req: NextRequest) {
         .filter(Boolean);
 
       if (values.length === 0) {
-        if (fieldDef.required) {
+        if (fieldDef.required && isDefaultProject) {
           return NextResponse.json(
             { error: `${fieldDef.label} ist erforderlich` },
             { status: 400 },
@@ -208,9 +218,21 @@ export async function POST(req: NextRequest) {
           { status: 400 },
         );
       }
-      extraFields[fieldDef.fieldId] = fieldDef.multiple
-        ? values.map((id) => ({ id }))
-        : { id: values[0] };
+
+      if (isDefaultProject) {
+        extraFields[fieldDef.fieldId] = fieldDef.multiple
+          ? values.map((id) => ({ id }))
+          : { id: values[0] };
+      } else {
+        const optionLabels = values.map((id) => fieldDef.options.find((o) => o.id === id)?.label ?? id);
+        foldedLines.push(`${fieldDef.label}: ${optionLabels.join(", ")}`);
+      }
+    }
+    if (foldedLines.length) {
+      fullDescription = `${fullDescription}\n\n— Zusätzliche Angaben (im Zielprojekt nicht als Feld verfügbar):\n${foldedLines.join("\n")}`;
+    }
+    if (fullDescription) {
+      extraFields[DESCRIPTION_FIELD[group]] = fullDescription;
     }
 
     // Komponente vorab auflösen (ggf. in Jira neu anlegen). Schlägt das fehl
@@ -220,7 +242,7 @@ export async function POST(req: NextRequest) {
     let componentWarning: string | undefined;
     if (!resolvedComponentId && newComponentName) {
       try {
-        const comp = await findOrCreateComponent(newComponentName);
+        const comp = await findOrCreateComponent(newComponentName, effectiveProjectKey);
         resolvedComponentId = comp.id;
       } catch (e) {
         console.error("[api/tickets] Komponente anlegen fehlgeschlagen:", e);
@@ -229,7 +251,7 @@ export async function POST(req: NextRequest) {
     }
 
     const created = await createIssue({
-      projectKey,
+      projectKey: effectiveProjectKey,
       issueTypeName: GROUP_TO_JIRA_TYPE[group],
       summary,
       extraFields,
@@ -254,6 +276,10 @@ export async function POST(req: NextRequest) {
           .join(" ");
       }
     }
+
+    // Anhänge laufen über einen separaten Endpoint (POST /api/tickets/{key}/
+    // attachments, ein Request pro Datei), damit das 4,5-MB-Request-Limit von
+    // Vercel pro Datei statt für die Summe aller Anhänge gilt.
 
     return NextResponse.json(
       { key: created.key, jiraUrl: `${baseUrl}/browse/${created.key}`, warning },

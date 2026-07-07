@@ -181,6 +181,35 @@ export async function createIssue(params: {
   return (await res.json()) as CreatedIssue;
 }
 
+/**
+ * Hängt eine Datei an einen bestehenden Vorgang an (POST .../attachments).
+ * Nutzt bewusst kein jiraFetch(), da dieses den Body immer als JSON sendet –
+ * Jiras Attachment-Endpoint erwartet multipart/form-data und den Header
+ * `X-Atlassian-Token: no-check` (CSRF-Ausnahme für diesen Endpunkt).
+ */
+export async function addAttachment(issueKey: string, file: File): Promise<void> {
+  const { baseUrl, email, token } = getJiraConfig();
+  const form = new FormData();
+  form.append("file", file, file.name);
+
+  const res = await fetch(`${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/attachments`, {
+    method: "POST",
+    headers: {
+      Authorization: authHeader(email, token),
+      "X-Atlassian-Token": "no-check",
+      Accept: "application/json",
+    },
+    body: form,
+  });
+  if (!res.ok) {
+    throw new JiraError(
+      `Anhang "${file.name}" hochladen fehlgeschlagen (${res.status})`,
+      res.status,
+      await safeText(res),
+    );
+  }
+}
+
 /** Reduziert einen rohen Jira-Vorgang auf die fürs Frontend nötigen Felder. */
 export function mapIssueToTicket(issue: JiraIssue, baseUrl: string): Ticket {
   const f = issue.fields ?? {};
@@ -244,7 +273,10 @@ export async function updateIssue(key: string, fields: Record<string, unknown>):
 // ── Meta: bestehende Stichwörter, Prioritäten und Komponenten (mit kurzem Cache) ──
 let labelCache: { values: string[]; at: number } | null = null;
 let priorityCache: { values: SelectOption[]; at: number } | null = null;
-let componentCache: { values: SelectOption[]; at: number } | null = null;
+// Pro Projekt-Key gecacht, da Komponenten projektgebunden sind (z. B. WIDEA
+// und CATI haben unterschiedliche Komponentenlisten).
+const componentCache = new Map<string, { values: SelectOption[]; at: number }>();
+let projectCache: { values: SelectOption[]; at: number } | null = null;
 const CACHE_MS = 5 * 60 * 1000;
 
 /** Alle existierenden Stichwörter (paginiert), für die Komponenten-Combobox. */
@@ -305,13 +337,17 @@ export async function searchUserByEmail(email: string): Promise<boolean> {
   return users.length === 1 && !users[0].emailAddress;
 }
 
-/** Bestehende Jira-Project-Components (echtes Components-Feld, nicht Labels). */
-export async function getComponents(forceRefresh = false): Promise<SelectOption[]> {
-  if (!forceRefresh && componentCache && Date.now() - componentCache.at < CACHE_MS) {
-    return componentCache.values;
+/**
+ * Bestehende Jira-Project-Components (echtes Components-Feld, nicht Labels).
+ * `projectKey` optional – Standard ist das konfigurierte Default-Projekt.
+ */
+export async function getComponents(projectKey?: string, forceRefresh = false): Promise<SelectOption[]> {
+  const key = projectKey || getJiraConfig().projectKey;
+  const cached = componentCache.get(key);
+  if (!forceRefresh && cached && Date.now() - cached.at < CACHE_MS) {
+    return cached.values;
   }
-  const { projectKey } = getJiraConfig();
-  const res = await jiraFetch(`/rest/api/2/project/${encodeURIComponent(projectKey)}/components`);
+  const res = await jiraFetch(`/rest/api/2/project/${encodeURIComponent(key)}/components`);
   if (!res.ok) {
     throw new JiraError(`Komponenten laden fehlgeschlagen (${res.status})`, res.status, await safeText(res));
   }
@@ -319,7 +355,7 @@ export async function getComponents(forceRefresh = false): Promise<SelectOption[
   const values = raw
     .map((c) => ({ id: c.id, label: c.name }))
     .sort((a, b) => a.label.localeCompare(b.label, "de"));
-  componentCache = { values, at: Date.now() };
+  componentCache.set(key, { values, at: Date.now() });
   return values;
 }
 
@@ -327,26 +363,52 @@ export async function getComponents(forceRefresh = false): Promise<SelectOption[
  * Findet eine Component per Name (case-insensitiv) oder legt sie in Jira neu an
  * (POST /rest/api/2/component – erfordert i. d. R. "Administer Projects" für den
  * Service-Account). Bei Konflikt durch eine parallele Anfrage wird erneut gesucht,
- * statt hart zu scheitern.
+ * statt hart zu scheitern. `projectKey` optional – Standard ist das konfigurierte
+ * Default-Projekt.
  */
-export async function findOrCreateComponent(name: string): Promise<SelectOption> {
+export async function findOrCreateComponent(name: string, projectKey?: string): Promise<SelectOption> {
+  const key = projectKey || getJiraConfig().projectKey;
   const needle = name.trim().toLowerCase();
-  const existing = (await getComponents()).find((c) => c.label.toLowerCase() === needle);
+  const existing = (await getComponents(key)).find((c) => c.label.toLowerCase() === needle);
   if (existing) return existing;
 
-  const { projectKey } = getJiraConfig();
   const res = await jiraFetch("/rest/api/2/component", {
     method: "POST",
-    body: { name: name.trim(), project: projectKey },
+    body: { name: name.trim(), project: key },
   });
   if (res.ok) {
     const created = (await res.json()) as { id: string; name: string };
-    componentCache = null;
+    componentCache.delete(key);
     return { id: created.id, label: created.name };
   }
 
-  const retry = (await getComponents(true)).find((c) => c.label.toLowerCase() === needle);
+  const retry = (await getComponents(key, true)).find((c) => c.label.toLowerCase() === needle);
   if (retry) return retry;
 
   throw new JiraError(`Komponente anlegen fehlgeschlagen (${res.status})`, res.status, await safeText(res));
+}
+
+/** Alle Jira-Projekte, die der Service-Account sehen kann (für das Zielprojekt-Dropdown). */
+export async function getProjects(): Promise<SelectOption[]> {
+  if (projectCache && Date.now() - projectCache.at < CACHE_MS) return projectCache.values;
+
+  const all: SelectOption[] = [];
+  let startAt = 0;
+  for (let i = 0; i < 10; i++) {
+    const res = await jiraFetch(`/rest/api/3/project/search?maxResults=50&startAt=${startAt}`);
+    if (!res.ok) {
+      throw new JiraError(`Projekte laden fehlgeschlagen (${res.status})`, res.status, await safeText(res));
+    }
+    const data = (await res.json()) as {
+      values?: Array<{ key: string; name: string }>;
+      isLast?: boolean;
+    };
+    const values = data.values ?? [];
+    all.push(...values.map((p) => ({ id: p.key, label: `${p.key} – ${p.name}` })));
+    if (data.isLast || values.length === 0) break;
+    startAt += values.length;
+  }
+  const sorted = all.sort((a, b) => a.label.localeCompare(b.label, "de"));
+  projectCache = { values: sorted, at: Date.now() };
+  return sorted;
 }

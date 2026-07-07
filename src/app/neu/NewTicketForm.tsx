@@ -18,6 +18,18 @@ const TURNSTILE_ENABLED = SITEKEY.length > 0;
 
 const NEW_COMPONENT_VALUE = "__new__";
 
+// Muss mit dem Limit in src/app/api/tickets/[key]/attachments/route.ts
+// übereinstimmen (Vercel Route Handler haben ein hartes 4,5-MB-Request-Limit
+// – jede Datei geht in einem eigenen Request, daher gilt das Limit pro Datei).
+const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+const MAX_ATTACHMENT_COUNT = 10;
+
+function formatBytes(bytes: number): string {
+  return bytes >= 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 declare global {
   interface Window {
     turnstile?: {
@@ -34,11 +46,30 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState<Msg>(null);
   const [labels, setLabels] = useState<string[]>([]);
-  const [components, setComponents] = useState<SelectOption[]>([]);
+  const [defaultComponents, setDefaultComponents] = useState<SelectOption[]>([]);
+  const [projectComponents, setProjectComponents] = useState<SelectOption[]>([]);
   const [componentChoice, setComponentChoice] = useState("");
   const [priorities, setPriorities] = useState<SelectOption[]>(FALLBACK_PRIORITIES);
+  const [projects, setProjects] = useState<SelectOption[]>([]);
+  const [targetProjectKey, setTargetProjectKey] = useState("");
+  const [attachments, setAttachments] = useState<File[]>([]);
 
-  // Auswahldaten (bestehende Stichwörter, Komponenten, Prioritäten) laden.
+  const oversizedAttachments = attachments.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+
+  function addAttachments(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return;
+    setAttachments((prev) => [...prev, ...Array.from(fileList)].slice(0, MAX_ATTACHMENT_COUNT));
+  }
+
+  function removeAttachment(index: number) {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  // Angezeigte Komponenten: Standard-Projekt-Liste, oder – sobald ein
+  // abweichendes Zielprojekt gewählt wurde – dessen nachgeladene Liste.
+  const components = targetProjectKey ? projectComponents : defaultComponents;
+
+  // Auswahldaten (bestehende Stichwörter, Komponenten, Prioritäten, Projekte) laden.
   useEffect(() => {
     let active = true;
     fetch("/api/meta")
@@ -46,14 +77,33 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
       .then((d) => {
         if (!active || !d) return;
         if (Array.isArray(d.labels)) setLabels(d.labels);
-        if (Array.isArray(d.components)) setComponents(d.components);
+        if (Array.isArray(d.components)) setDefaultComponents(d.components);
         if (Array.isArray(d.priorities) && d.priorities.length) setPriorities(d.priorities);
+        if (Array.isArray(d.projects)) setProjects(d.projects);
       })
       .catch(() => {});
     return () => {
       active = false;
     };
   }, []);
+
+  // Wechselt das Zielprojekt (nur beim Typ "Fehler" möglich), werden dessen
+  // eigene Komponenten nachgeladen statt der Default-Projekt-Liste.
+  // (componentChoice wird beim Auslösen des Wechsels im onChange zurückgesetzt.)
+  useEffect(() => {
+    if (!targetProjectKey) return;
+    let active = true;
+    fetch(`/api/meta?project=${encodeURIComponent(targetProjectKey)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!active || !d || !Array.isArray(d.components)) return;
+        setProjectComponents(d.components);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [targetProjectKey]);
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -69,19 +119,22 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
 
     const type = (fd.get("type") as string) || "";
 
-    // Typ-spezifische Auswahlfelder einsammeln (+ Pflicht-Check).
+    // Typ-spezifische Auswahlfelder einsammeln (+ Pflicht-Check). Bei einem
+    // abweichenden Zielprojekt (nur "Fehler") sind diese Felder nicht mehr
+    // Pflicht, da sie dort ggf. gar nicht existieren.
     const customFields: Record<string, string | string[]> = {};
     if (isTicketGroup(type)) {
       for (const field of EXTRA_FIELDS[type]) {
+        const fieldRequired = field.required && !targetProjectKey;
         if (field.multiple) {
           const values = fd.getAll(field.name).map((v) => v.toString());
-          if (field.required && values.length === 0) {
+          if (fieldRequired && values.length === 0) {
             return setMsg({ type: "error", node: `Bitte „${field.label}" auswählen.` });
           }
           if (values.length) customFields[field.name] = values;
         } else {
           const value = (fd.get(field.name) as string) || "";
-          if (field.required && !value) {
+          if (fieldRequired && !value) {
             return setMsg({ type: "error", node: `Bitte „${field.label}" auswählen.` });
           }
           if (value) customFields[field.name] = value;
@@ -104,6 +157,7 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
       newComponentName: componentChoice === NEW_COMPONENT_VALUE ? newComponentName : undefined,
       priority: (fd.get("priority") as string) || "",
       customFields,
+      targetProjectKey: targetProjectKey || undefined,
       reporterName: ((fd.get("reporterName") as string) || "").trim(),
       reporterEmail: ((fd.get("reporterEmail") as string) || "").trim(),
       turnstileToken,
@@ -113,6 +167,12 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
     if (!payload.summary) return setMsg({ type: "error", node: "Bitte einen Titel eingeben." });
     if (TURNSTILE_ENABLED && !payload.turnstileToken)
       return setMsg({ type: "error", node: "Bitte die Sicherheitsprüfung (Captcha) abschließen." });
+    if (oversizedAttachments.length > 0) {
+      return setMsg({
+        type: "error",
+        node: `Zu groß (max. ${formatBytes(MAX_ATTACHMENT_BYTES)} pro Datei): ${oversizedAttachments.map((f) => f.name).join(", ")}`,
+      });
+    }
 
     setSubmitting(true);
     try {
@@ -128,6 +188,33 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
         warning?: string;
       };
       if (!res.ok) throw new Error(data.error || `Fehler ${res.status}`);
+
+      // Anhänge einzeln nachladen (ein Request pro Datei, da Vercel ein
+      // hartes 4,5-MB-Limit pro Request hat – so gilt es pro Datei statt für
+      // die Summe aller Anhänge).
+      let attachmentWarning: string | undefined;
+      if (attachments.length > 0 && data.key) {
+        const key = data.key;
+        const results = await Promise.allSettled(
+          attachments.map(async (file) => {
+            const fileData = new FormData();
+            fileData.append("file", file);
+            const r = await fetch(`/api/tickets/${encodeURIComponent(key)}/attachments`, {
+              method: "POST",
+              body: fileData,
+            });
+            if (!r.ok) throw new Error(file.name);
+          }),
+        );
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed > 0) {
+          attachmentWarning =
+            failed === attachments.length
+              ? "Anhänge konnten nicht hochgeladen werden."
+              : `${failed} von ${attachments.length} Anhängen konnten nicht hochgeladen werden.`;
+        }
+      }
+      data.warning = [data.warning, attachmentWarning].filter(Boolean).join(" ") || undefined;
 
       setMsg({
         type: "success",
@@ -153,6 +240,8 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
       form.reset();
       setSelectedType("");
       setComponentChoice("");
+      setTargetProjectKey("");
+      setAttachments([]);
       window.turnstile?.reset();
     } catch (err) {
       setMsg({
@@ -198,7 +287,10 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
                       name="type"
                       value={t.key}
                       checked={active}
-                      onChange={() => setSelectedType(t.key)}
+                      onChange={() => {
+                        setSelectedType(t.key);
+                        if (t.key !== "fehler") setTargetProjectKey("");
+                      }}
                       className="sr-only"
                     />
                     <span className="block text-sm font-semibold">
@@ -232,6 +324,53 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
               placeholder="Worum geht es? Bei Fehlern: Schritte zum Nachstellen, erwartetes vs. tatsächliches Verhalten."
               className={`${inputClass} resize-y`}
             />
+          </Field>
+
+          {/* Anhänge: Screenshots/Dateien, werden nach dem Anlegen einzeln an den Vorgang gehängt */}
+          <Field
+            label="Anhänge"
+            hint={`(optional – Screenshots/Dateien, je Datei max. ${formatBytes(MAX_ATTACHMENT_BYTES)}, max. ${MAX_ATTACHMENT_COUNT} Dateien)`}
+          >
+            <input
+              type="file"
+              multiple
+              aria-label="Anhänge"
+              onChange={(e) => {
+                addAttachments(e.target.files);
+                e.target.value = "";
+              }}
+              className={`${inputClass} cursor-pointer file:mr-3 file:cursor-pointer file:rounded-full file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-zinc-700 hover:file:bg-zinc-200 dark:file:bg-zinc-800 dark:file:text-zinc-200`}
+            />
+            {attachments.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {attachments.map((file, i) => {
+                  const tooLarge = file.size > MAX_ATTACHMENT_BYTES;
+                  return (
+                    <li
+                      key={`${file.name}-${i}`}
+                      className={`flex items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-xs ${
+                        tooLarge
+                          ? "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300"
+                          : "bg-zinc-50 dark:bg-zinc-800/60"
+                      }`}
+                    >
+                      <span className="truncate">
+                        {file.name} <span className="text-zinc-400">({formatBytes(file.size)})</span>
+                        {tooLarge && " – zu groß"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(i)}
+                        className="shrink-0 text-zinc-400 hover:text-red-600"
+                        aria-label={`${file.name} entfernen`}
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </Field>
 
           {/* Komponente: echte Jira-Project-Components, mit Möglichkeit zur Neuanlage */}
@@ -292,15 +431,49 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
             </select>
           </Field>
 
+          {/* Zielprojekt: nur beim Fehler-Typ, optional – ohne Auswahl geht der Bug ins Default-Projekt */}
+          {selectedType === "fehler" && (
+            <Field
+              label="Zielprojekt"
+              hint="(optional – ohne Auswahl: Standardprojekt)"
+            >
+              <select
+                aria-label="Zielprojekt"
+                value={targetProjectKey}
+                onChange={(e) => {
+                  setTargetProjectKey(e.target.value);
+                  setComponentChoice("");
+                }}
+                className={inputClass}
+              >
+                <option value="">Standard (WIDEA)</option>
+                {projects
+                  .filter((p) => p.id !== "WIDEA")
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+              </select>
+              {targetProjectKey && (
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  Fehlertyp/Fehlerklasse/Umgebung existieren dort ggf. nicht als eigenes Feld und
+                  werden stattdessen in die Beschreibung übernommen.
+                </p>
+              )}
+            </Field>
+          )}
+
           {/* Typ-spezifische Felder (z. B. Fehlertyp/Fehlerklasse/Umgebung beim Fehler) */}
           {isTicketGroup(selectedType) &&
-            EXTRA_FIELDS[selectedType].map((field) =>
-              field.multiple ? (
+            EXTRA_FIELDS[selectedType].map((field) => {
+              const fieldRequired = field.required && !targetProjectKey;
+              return field.multiple ? (
                 <fieldset key={field.name}>
                   <legend className="mb-1.5 block text-sm font-semibold">
                     {field.label}{" "}
                     <span className="font-normal text-zinc-500 dark:text-zinc-400">
-                      {field.required ? "(erforderlich)" : "(optional, Mehrfachauswahl)"}
+                      {fieldRequired ? "(erforderlich)" : "(optional, Mehrfachauswahl)"}
                     </span>
                   </legend>
                   <div className="flex flex-wrap gap-3">
@@ -316,12 +489,12 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
                 <Field
                   key={field.name}
                   label={field.label}
-                  hint={field.required ? "(erforderlich)" : "(optional)"}
+                  hint={fieldRequired ? "(erforderlich)" : "(optional)"}
                 >
                   <select
                     name={field.name}
                     aria-label={field.label}
-                    required={field.required}
+                    required={fieldRequired}
                     className={inputClass}
                     defaultValue=""
                   >
@@ -333,8 +506,8 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
                     ))}
                   </select>
                 </Field>
-              ),
-            )}
+              );
+            })}
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="Dein Name" hint="(optional)">
