@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import Script from "next/script";
 import {
@@ -53,16 +61,74 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
   const [projects, setProjects] = useState<SelectOption[]>([]);
   const [targetProjectKey, setTargetProjectKey] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+  // Zählt verschachtelte dragenter/dragleave-Events (die beim Überqueren von
+  // Kind-Elementen der großen Drop-Zone ständig feuern), damit dragActive nur
+  // beim tatsächlichen Verlassen der gesamten Zone auf false wechselt.
+  const dragCounterRef = useRef(0);
 
   const oversizedAttachments = attachments.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
 
-  function addAttachments(fileList: FileList | null) {
-    if (!fileList || fileList.length === 0) return;
-    setAttachments((prev) => [...prev, ...Array.from(fileList)].slice(0, MAX_ATTACHMENT_COUNT));
-  }
+  // Nimmt ein bereits materialisiertes File[] entgegen (nicht die "live"
+  // FileList/DataTransfer selbst – die kann sich unter der Hand leeren, z. B.
+  // wenn der Aufrufer direkt danach input.value zurücksetzt, bevor React den
+  // Updater ausführt). useCallback mit stabiler Identität, damit der
+  // paste-Listener unten nicht bei jedem Render neu registriert wird.
+  const addAttachments = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    setAttachments((prev) => [...prev, ...files].slice(0, MAX_ATTACHMENT_COUNT));
+  }, []);
+
+  // Screenshot aus der Zwischenablage einfügen (Strg+V oder Rechtsklick →
+  // Einfügen lösen beide dasselbe paste-Event aus). Am document statt an
+  // einem einzelnen Feld, damit es unabhängig vom Fokus funktioniert.
+  useEffect(() => {
+    function handlePaste(e: ClipboardEvent) {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const images: File[] = [];
+      for (const item of items) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (!file) continue;
+          // Screenshots aus der Zwischenablage heißen oft nur "image.png" –
+          // mit Zeitstempel benennen, damit mehrere unterscheidbar bleiben.
+          const ext = item.type.split("/")[1] || "png";
+          images.push(new File([file], `screenshot-${Date.now()}.${ext}`, { type: file.type }));
+        }
+      }
+      if (images.length > 0) addAttachments(images);
+    }
+    document.addEventListener("paste", handlePaste);
+    return () => document.removeEventListener("paste", handlePaste);
+  }, [addAttachments]);
 
   function removeAttachment(index: number) {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  // Drag & Drop über die gesamte Formular-Karte (nicht nur das kleine
+  // Anhänge-Feld) – dragenter/dragleave zählen, weil sie beim Überqueren
+  // jedes verschachtelten Elements innerhalb der Karte feuern.
+  function handleDragEnter(e: DragEvent) {
+    e.preventDefault();
+    if (!e.dataTransfer.types.includes("Files")) return;
+    dragCounterRef.current += 1;
+    setDragActive(true);
+  }
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault(); // nötig, damit onDrop überhaupt feuert
+  }
+  function handleDragLeave(e: DragEvent) {
+    e.preventDefault();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) setDragActive(false);
+  }
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setDragActive(false);
+    addAttachments(Array.from(e.dataTransfer.files));
   }
 
   // Angezeigte Komponenten: Standard-Projekt-Liste, oder – sobald ein
@@ -263,7 +329,20 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
         />
       )}
 
-      <div className="mx-auto max-w-2xl rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <div
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className="relative mx-auto max-w-2xl rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+      >
+        {dragActive && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl border-4 border-dashed border-blue-500 bg-blue-50/95 dark:bg-blue-950/90">
+            <p className="text-lg font-semibold text-blue-700 dark:text-blue-300">
+              📎 Datei hier ablegen zum Anhängen
+            </p>
+          </div>
+        )}
         <h2 className="mb-5 text-xl font-semibold">Neues Ticket melden</h2>
 
         <form onSubmit={handleSubmit} className="space-y-5">
@@ -331,16 +410,27 @@ export function NewTicketForm({ defaultReporterEmail = "" }: { defaultReporterEm
             label="Anhänge"
             hint={`(optional – Screenshots/Dateien, je Datei max. ${formatBytes(MAX_ATTACHMENT_BYTES)}, max. ${MAX_ATTACHMENT_COUNT} Dateien)`}
           >
-            <input
-              type="file"
-              multiple
-              aria-label="Anhänge"
-              onChange={(e) => {
-                addAttachments(e.target.files);
-                e.target.value = "";
-              }}
-              className={`${inputClass} cursor-pointer file:mr-3 file:cursor-pointer file:rounded-full file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-zinc-700 hover:file:bg-zinc-200 dark:file:bg-zinc-800 dark:file:text-zinc-200`}
-            />
+            <div className="rounded-lg border-2 border-dashed border-zinc-300 p-4 text-center text-sm dark:border-zinc-700">
+              <label className="cursor-pointer">
+                <span className="font-semibold text-blue-600 underline dark:text-blue-400">
+                  Dateien auswählen
+                </span>{" "}
+                <span className="text-zinc-500 dark:text-zinc-400">
+                  oder irgendwo auf die Karte ziehen oder mit Strg+V einfügen
+                </span>
+                <input
+                  type="file"
+                  multiple
+                  aria-label="Anhänge"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files ?? []);
+                    e.target.value = "";
+                    addAttachments(files);
+                  }}
+                  className="sr-only"
+                />
+              </label>
+            </div>
             {attachments.length > 0 && (
               <ul className="mt-2 space-y-1">
                 {attachments.map((file, i) => {
