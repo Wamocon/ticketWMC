@@ -1,0 +1,23 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - link "WMC Ticketsystem" [ref=e4] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e8]: WMC Ticketsystem
+      - navigation [ref=e9]:
+        - link "Anmelden" [ref=e10] [cursor=pointer]:
+          - /url: /login
+  - main [ref=e11]:
+    - generic [ref=e12]:
+      - heading "Anmelden" [level=2] [ref=e13]
+      - paragraph [ref=e14]: Gib deine E-Mail-Adresse ein. Ist sie einem Jira-Account zugeordnet, schicken wir dir einen Login-Link.
+      - generic [ref=e15]:
+        - generic [ref=e16]:
+          - generic [ref=e17]: E-Mail
+          - textbox "E-Mail" [ref=e18]:
+            - /placeholder: du@wamocon.de
+        - button "Login-Link anfordern" [ref=e19]
+      - button "Als Gast anmelden" [ref=e21]
+  - contentinfo [ref=e22]: WMC Ticketsystem · Daten live aus Jira Cloud · keine eigene Datenbank
+  - button "Open Next.js Dev Tools" [ref=e28] [cursor=pointer]:
+    - img [ref=e29]

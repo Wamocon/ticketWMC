@@ -6,6 +6,8 @@ import {
   updateIssue,
   mapIssueToTicket,
   findOrCreateComponent,
+  findUserAccountId,
+  getAvailableCreateFields,
   JiraError,
   SEARCH_FIELDS,
 } from "@/lib/jira";
@@ -19,6 +21,7 @@ import {
   type TicketGroup,
 } from "@/lib/ticketTypes";
 import { rateLimit, clientIp } from "@/lib/rateLimit";
+import { verifySessionCookie, SESSION_COOKIE_NAME } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -173,12 +176,13 @@ export async function POST(req: NextRequest) {
 
     const group = type as TicketGroup;
 
-    // Nur "fehler" darf in ein abweichendes Projekt umgeleitet werden. Hat
-    // das Zielprojekt nicht dieselben Custom-Fields wie das Default-Projekt
-    // (z. B. Fehlertyp/Fehlerklasse), werden diese unten als Text in die
-    // Beschreibung gefaltet statt als Custom-Field übertragen.
+    // Nur "fehler" darf in ein abweichendes Projekt umgeleitet werden. Welche
+    // Custom-Fields (Fehlertyp/Fehlerklasse/Umgebung) das Zielprojekt für den
+    // Issuetype tatsächlich auf dem Erstellen-Screen hat, wird unten per
+    // createmeta geprüft statt pauschal am Projekt-Key festgemacht – manche
+    // Zielprojekte (z. B. CATI) haben inzwischen dieselben Felder wie WIDEA.
     const effectiveProjectKey = group === "fehler" && targetProjectKey ? targetProjectKey : projectKey;
-    const isDefaultProject = effectiveProjectKey === projectKey;
+    const availableFields = await getAvailableCreateFields(effectiveProjectKey, GROUP_TO_JIRA_TYPE[group]);
 
     // Freitext zusammenbauen (inkl. optionaler Melder-Angaben).
     let fullDescription = description;
@@ -192,19 +196,20 @@ export async function POST(req: NextRequest) {
       fullDescription = `${fullDescription}\n\n— Gemeldet über WMC-Ticketsystem (${meta})`;
     }
 
-    // Jira-konforme Felder je Typ aufbauen. Im Default-Projekt strukturiert
-    // als Custom-Fields; in einem abweichenden Zielprojekt (das diese Felder
-    // nicht hat) stattdessen als lesbarer Text in die Beschreibung gefaltet.
+    // Jira-konforme Felder je Typ aufbauen. Hat das Zielprojekt das Feld auf
+    // dem Erstellen-Screen (availableFields), wird es strukturiert als
+    // Custom-Field übertragen; sonst als lesbarer Text in die Beschreibung gefaltet.
     const extraFields: Record<string, unknown> = {};
     const foldedLines: string[] = [];
     for (const fieldDef of EXTRA_FIELDS[group]) {
+      const hasField = availableFields.has(fieldDef.fieldId);
       const raw = customFields[fieldDef.name];
       const values = (Array.isArray(raw) ? raw : raw ? [raw] : [])
         .map((v) => v.toString().trim())
         .filter(Boolean);
 
       if (values.length === 0) {
-        if (fieldDef.required && isDefaultProject) {
+        if (fieldDef.required && hasField) {
           return NextResponse.json(
             { error: `${fieldDef.label} ist erforderlich` },
             { status: 400 },
@@ -219,7 +224,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      if (isDefaultProject) {
+      if (hasField) {
         extraFields[fieldDef.fieldId] = fieldDef.multiple
           ? values.map((id) => ({ id }))
           : { id: values[0] };
@@ -257,6 +262,26 @@ export async function POST(req: NextRequest) {
       extraFields,
     });
 
+    // Melder (Jira-Feld "reporter") auf den eingeloggten Jira-User setzen statt
+    // auf den Service-Account, der die API-Aufrufe ausführt. Eigener, von
+    // Label/Komponente/Priorität getrennter Aufruf, damit eine fehlende
+    // "Modify Reporter"-Berechtigung des Service-Accounts die übrigen Felder
+    // nicht mit blockiert (Jira validiert ein PUT sonst atomar).
+    let reporterWarning: string | undefined;
+    const sessionCookie = req.cookies.get(SESSION_COOKIE_NAME)?.value;
+    const session = sessionCookie ? await verifySessionCookie(sessionCookie) : null;
+    if (session?.email) {
+      try {
+        const accountId = await findUserAccountId(session.email);
+        if (accountId) {
+          await updateIssue(created.key, { reporter: { accountId } });
+        }
+      } catch (e) {
+        console.error("[api/tickets] Melder setzen fehlgeschlagen:", e);
+        reporterWarning = "Vorgang angelegt, aber Melder konnte nicht auf deinen Account gesetzt werden.";
+      }
+    }
+
     // Label, Komponente und Priorität liegen nicht auf allen Erstellen-Masken
     // → per Update nachsetzen. Schlägt das fehl, ist der Vorgang trotzdem
     // angelegt; wir melden es als Warnung.
@@ -265,7 +290,7 @@ export async function POST(req: NextRequest) {
     if (resolvedComponentId) updateFields.components = [{ id: resolvedComponentId }];
     if (priorityId) updateFields.priority = { id: priorityId };
 
-    let warning = componentWarning;
+    let warning = [componentWarning, reporterWarning].filter(Boolean).join(" ") || undefined;
     if (Object.keys(updateFields).length > 0) {
       try {
         await updateIssue(created.key, updateFields);

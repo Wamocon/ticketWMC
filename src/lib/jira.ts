@@ -277,7 +277,44 @@ let priorityCache: { values: SelectOption[]; at: number } | null = null;
 // und CATI haben unterschiedliche Komponentenlisten).
 const componentCache = new Map<string, { values: SelectOption[]; at: number }>();
 let projectCache: { values: SelectOption[]; at: number } | null = null;
+// Pro Projekt+Issuetype gecacht (z. B. "CATI:Bug"), da Felder auf dem
+// Erstellen-Screen je Projekt und Vorgangstyp unterschiedlich sind.
+const createFieldsCache = new Map<string, { fields: Set<string>; at: number }>();
 const CACHE_MS = 5 * 60 * 1000;
+
+/**
+ * Welche Feld-IDs stehen für ein Projekt+Issuetype auf dem Erstellen-Screen
+ * zur Verfügung (POST /rest/api/3/issue/createmeta)? Damit lässt sich z. B.
+ * prüfen, ob ein abweichendes Zielprojekt (Custom-Field-seitig) dieselben
+ * Felder wie das Default-Projekt hat, statt das pauschal anzunehmen/zu verneinen.
+ */
+export async function getAvailableCreateFields(
+  projectKey: string,
+  issueTypeName: string,
+): Promise<Set<string>> {
+  const cacheKey = `${projectKey}:${issueTypeName}`;
+  const cached = createFieldsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < CACHE_MS) return cached.fields;
+
+  const res = await jiraFetch(
+    `/rest/api/3/issue/createmeta?projectKeys=${encodeURIComponent(projectKey)}` +
+      `&issuetypeNames=${encodeURIComponent(issueTypeName)}&expand=projects.issuetypes.fields`,
+  );
+  if (!res.ok) {
+    throw new JiraError(
+      `Formular-Metadaten laden fehlgeschlagen (${res.status})`,
+      res.status,
+      await safeText(res),
+    );
+  }
+  const data = (await res.json()) as {
+    projects?: Array<{ issuetypes?: Array<{ name?: string; fields?: Record<string, unknown> }> }>;
+  };
+  const issuetype = data.projects?.[0]?.issuetypes?.find((it) => it.name === issueTypeName);
+  const fields = new Set(Object.keys(issuetype?.fields ?? {}));
+  createFieldsCache.set(cacheKey, { fields, at: Date.now() });
+  return fields;
+}
 
 /** Alle existierenden Stichwörter (paginiert), für die Komponenten-Combobox. */
 export async function getLabels(): Promise<string[]> {
@@ -317,24 +354,32 @@ export async function getPriorities(): Promise<SelectOption[]> {
   return values;
 }
 
-/** Prüft per Jira-User-Suche, ob die E-Mail zu einem existierenden User gehört (fürs Login). */
-export async function searchUserByEmail(email: string): Promise<boolean> {
+/** Sucht einen Jira-User per E-Mail und liefert dessen accountId (oder null). */
+export async function findUserAccountId(email: string): Promise<string | null> {
   const res = await jiraFetch(`/rest/api/3/user/search?query=${encodeURIComponent(email)}`);
   if (!res.ok) {
     throw new JiraError(`Jira-User-Suche fehlgeschlagen (${res.status})`, res.status, await safeText(res));
   }
-  const users = (await res.json()) as Array<{ emailAddress?: string }>;
-  if (users.length === 0) return false;
+  const users = (await res.json()) as Array<{ accountId?: string; emailAddress?: string }>;
+  if (users.length === 0) return null;
 
   const needle = email.trim().toLowerCase();
-  if (users.some((u) => (u.emailAddress ?? "").toLowerCase() === needle)) return true;
+  const exact = users.find((u) => (u.emailAddress ?? "").toLowerCase() === needle);
+  if (exact) return exact.accountId ?? null;
 
   // Manche Jira-User verstecken ihre E-Mail per Profil-Datenschutzeinstellung –
   // dann liefert Jira `emailAddress: ""`, obwohl die Suche selbst schon intern
   // gegen die (verborgene) E-Mail gematcht hat (sonst käme dieser eine Treffer
   // gar nicht zurück). Bei genau einem Ergebnis ohne emailAddress werten wir
   // das daher als Treffer.
-  return users.length === 1 && !users[0].emailAddress;
+  if (users.length === 1 && !users[0].emailAddress) return users[0].accountId ?? null;
+
+  return null;
+}
+
+/** Prüft per Jira-User-Suche, ob die E-Mail zu einem existierenden User gehört (fürs Login). */
+export async function searchUserByEmail(email: string): Promise<boolean> {
+  return (await findUserAccountId(email)) !== null;
 }
 
 /**

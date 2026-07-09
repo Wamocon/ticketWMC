@@ -1,0 +1,54 @@
+- generic [active] [ref=f2e1]:
+  - banner [ref=f2e2]:
+    - generic [ref=f2e3]:
+      - link "WMC Ticketsystem" [ref=f2e4] [cursor=pointer]:
+        - /url: /
+        - generic [ref=f2e8]: WMC Ticketsystem
+      - navigation [ref=f2e9]:
+        - link "Liveticker" [ref=f2e10] [cursor=pointer]:
+          - /url: /
+        - link "+ Neues Ticket" [ref=f2e11] [cursor=pointer]:
+          - /url: /neu
+        - generic [ref=f2e12]: elias.felsing@wamocon.com
+        - button "Abmelden" [ref=f2e13]
+  - main [ref=f2e14]:
+    - generic [ref=f2e15]:
+      - generic [ref=f2e16]:
+        - generic [ref=f2e17]: Live – aktualisiert automatisch
+        - generic [ref=f2e21]:
+          - text: "Zuletzt: –"
+          - button "Jetzt aktualisieren" [ref=f2e22]
+      - generic [ref=f2e23]:
+        - generic [ref=f2e24]:
+          - generic [ref=f2e25]: "Komponente:"
+          - combobox "Nach Komponente filtern" [ref=f2e26]:
+            - option "Alle" [selected]
+        - generic [ref=f2e27]:
+          - checkbox "Erledigte anzeigen" [checked] [ref=f2e28]
+          - generic [ref=f2e29]: Erledigte anzeigen
+        - generic [ref=f2e30]:
+          - text: "Dringlichkeit:"
+          - generic [ref=f2e31]: Kritisch
+          - generic [ref=f2e33]: Dringend
+          - generic [ref=f2e35]: Mittel
+          - generic [ref=f2e37]: Niedrig
+      - generic [ref=f2e39]:
+        - generic [ref=f2e40]:
+          - generic [ref=f2e41]:
+            - generic [ref=f2e42]: 💡 Produktideen
+            - generic [ref=f2e43]: 0 offen
+          - paragraph [ref=f2e45]: Lade…
+        - generic [ref=f2e46]:
+          - generic [ref=f2e47]:
+            - generic [ref=f2e48]: ⚙️ Optimierungen
+            - generic [ref=f2e49]: 0 offen
+          - paragraph [ref=f2e51]: Lade…
+        - generic [ref=f2e52]:
+          - generic [ref=f2e53]:
+            - generic [ref=f2e54]: 🐞 Fehler / Probleme
+            - generic [ref=f2e55]: 0 offen
+          - paragraph [ref=f2e57]: Lade…
+  - contentinfo [ref=f2e58]: WMC Ticketsystem · Daten live aus Jira Cloud · keine eigene Datenbank
+  - button "Open Next.js Dev Tools" [ref=f2e64] [cursor=pointer]:
+    - img [ref=f2e65]
+  - alert [ref=f2e68]
