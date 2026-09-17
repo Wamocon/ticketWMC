@@ -1,0 +1,203 @@
+name: QA-Fabrik Tests
+
+# Automatisch von der Sokrates QA-Fabrik erzeugt (Wamocon/wamocon-testautomatisierung,
+# app.testgen_repo.push_workflow). Fuehrt die dort fuer DIESES Repo generierten Tests aus
+# (wamocon-testautomatisierung:tests/ticketwmc/). Wird bei jedem neuen Generierungslauf fuer dieses
+# Repo automatisch aktualisiert - von Hand hier eingefuegte Schritte gehen dabei verloren, Aenderungen
+# an der Testauswahl/-logik gehoeren nach wamocon-testautomatisierung, nicht hierher.
+#
+# Die Testdateien werden bei JEDEM Lauf frisch aus wamocon-testautomatisierung ausgecheckt, nie
+# dauerhaft hierher kopiert/committet - derselbe Grundsatz wie beim Rest der QA-Fabrik.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Welche Pyramidenstufe(n)"
+        type: choice
+        default: all
+        options: [all, unit, integration, ui]
+      base_url:
+        description: "Nur fuer integration/ui: vorhandene URL statt lokal zu bauen/starten (z.B. Vercel-Preview). Leer = lokal starten."
+        type: string
+        default: ""
+
+jobs:
+  unit:
+    if: inputs.stage == 'all' || inputs.stage == 'unit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QA-Fabrik-Tests auschecken
+        uses: actions/checkout@v4
+        with:
+          repository: Wamocon/wamocon-testautomatisierung
+          path: qa-fabrik
+          sparse-checkout: |
+            tests/ticketwmc/unit
+            tests/ticketwmc/manifest.yml
+            tests/_shared
+          token: ${{ secrets.QA_FABRIK_TOKEN }}
+
+      - name: Vorhanden?
+        id: probe
+        run: echo "has=$([ -d qa-fabrik/tests/ticketwmc/unit ] && ls qa-fabrik/tests/ticketwmc/unit | grep -q . && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        if: steps.probe.outputs.has == 'true'
+        with: { node-version: "22" }
+
+      - name: Unit-Tests (vitest, siehe manifest.yml)
+        if: steps.probe.outputs.has == 'true'
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}
+        run: |
+          npm ci
+          (cd qa-fabrik/tests && npm ci && npx vitest run --config _shared/vitest.config.ts --dir ticketwmc/unit)
+
+      - name: Nichts generiert
+        if: steps.probe.outputs.has != 'true'
+        run: echo "::warning::Keine Unit-Tests fuer dieses Repo generiert - noch keinen Generierungslauf gehabt oder nichts Testbares gefunden."
+
+  integration:
+    if: inputs.stage == 'all' || inputs.stage == 'integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QA-Fabrik-Tests auschecken
+        uses: actions/checkout@v4
+        with:
+          repository: Wamocon/wamocon-testautomatisierung
+          path: qa-fabrik
+          token: ${{ secrets.QA_FABRIK_TOKEN }}
+
+      - name: Vorhanden?
+        id: probe
+        run: |
+          HAS=$([ -d "qa-fabrik/tests/ticketwmc/integration" ] && ls "qa-fabrik/tests/ticketwmc/integration" 2>/dev/null | grep -q . && echo true || echo false)
+          echo "has=$HAS" >> "$GITHUB_OUTPUT"
+          echo "has_compose=$([ -f "qa-fabrik/tests/ticketwmc/integration/docker-compose.yml" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: manifest.yml lesen
+        id: manifest
+        if: steps.probe.outputs.has == 'true'
+        run: |
+          M="qa-fabrik/tests/ticketwmc/manifest.yml"
+          if [ -f "$M" ]; then
+            echo "build=$(grep '^build_command:' "$M" | sed 's/^build_command:[[:space:]]*//;s/^"//;s/"$//')" >> "$GITHUB_OUTPUT"
+            echo "start=$(grep '^start_command:' "$M" | sed 's/^start_command:[[:space:]]*//;s/^"//;s/"$//')" >> "$GITHUB_OUTPUT"
+            echo "port=$(grep '^port:' "$M" | sed 's/^port:[[:space:]]*//')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.probe.outputs.has == 'true' && steps.probe.outputs.has_compose != 'true'
+        with: { node-version: "22" }
+
+      - name: Selbst lokal bauen und starten (ohne docker-compose.yml, ohne vorgegebene base_url)
+        id: local_start
+        if: steps.probe.outputs.has == 'true' && steps.probe.outputs.has_compose != 'true' && inputs.base_url == ''
+        run: |
+          [ -n "${{ steps.manifest.outputs.build }}" ] && eval "${{ steps.manifest.outputs.build }}"
+          if [ -n "${{ steps.manifest.outputs.start }}" ]; then
+            eval "${{ steps.manifest.outputs.start }}" &
+            npx --yes wait-on "http://localhost:${{ steps.manifest.outputs.port }}" -t 60000
+            echo "url=http://localhost:${{ steps.manifest.outputs.port }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Integrationstests (Playwright, request-Fixture gegen echte Instanz)
+        if: steps.probe.outputs.has == 'true' && steps.probe.outputs.has_compose != 'true'
+        env:
+          BASE_URL: ${{ inputs.base_url || steps.local_start.outputs.url }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "::warning::Keine BASE_URL (weder vorgegeben noch lokal gestartet) - Stufe übersprungen."
+            exit 0
+          fi
+          cd qa-fabrik/tests && npm ci
+          npx playwright test --config _shared/playwright.integration.config.ts ticketwmc/integration
+
+      - name: Integrationstests (docker compose)
+        if: steps.probe.outputs.has_compose == 'true'
+        run: |
+          COMPOSE="qa-fabrik/tests/ticketwmc/integration/docker-compose.yml"
+          docker compose -f "$COMPOSE" up -d --build
+          docker compose -f "$COMPOSE" run --rm tests || TESTS_FAILED=1
+          docker compose -f "$COMPOSE" down -v
+          [ -z "$TESTS_FAILED" ] || exit 1
+
+      - name: Nichts generiert
+        if: steps.probe.outputs.has != 'true'
+        run: echo "::warning::Keine Integrationstests fuer dieses Repo generiert."
+
+  ui:
+    if: inputs.stage == 'all' || inputs.stage == 'ui'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QA-Fabrik-Tests auschecken
+        uses: actions/checkout@v4
+        with:
+          repository: Wamocon/wamocon-testautomatisierung
+          path: qa-fabrik
+          token: ${{ secrets.QA_FABRIK_TOKEN }}
+
+      - name: Vorhanden?
+        id: probe
+        run: echo "has=$([ -d "qa-fabrik/tests/ticketwmc/ui" ] && ls "qa-fabrik/tests/ticketwmc/ui" | grep -q . && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: manifest.yml lesen
+        id: manifest
+        if: steps.probe.outputs.has == 'true'
+        run: |
+          M="qa-fabrik/tests/ticketwmc/manifest.yml"
+          if [ -f "$M" ]; then
+            echo "build=$(grep '^build_command:' "$M" | sed 's/^build_command:[[:space:]]*//;s/^"//;s/"$//')" >> "$GITHUB_OUTPUT"
+            echo "start=$(grep '^start_command:' "$M" | sed 's/^start_command:[[:space:]]*//;s/^"//;s/"$//')" >> "$GITHUB_OUTPUT"
+            echo "port=$(grep '^port:' "$M" | sed 's/^port:[[:space:]]*//')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.probe.outputs.has == 'true'
+        with: { node-version: "22" }
+
+      - name: Selbst lokal bauen und starten (ohne vorgegebene base_url)
+        id: local_start
+        if: steps.probe.outputs.has == 'true' && inputs.base_url == ''
+        run: |
+          if [ -z "${{ steps.manifest.outputs.start }}" ]; then
+            echo "::warning::Kein start_command in manifest.yml - lokaler Start uebersprungen."
+            exit 0
+          fi
+          [ -n "${{ steps.manifest.outputs.build }}" ] && eval "${{ steps.manifest.outputs.build }}"
+          eval "${{ steps.manifest.outputs.start }}" &
+          npx --yes wait-on "http://localhost:${{ steps.manifest.outputs.port }}" -t 60000
+          echo "url=http://localhost:${{ steps.manifest.outputs.port }}" >> "$GITHUB_OUTPUT"
+
+      - name: UI-Tests (Playwright)
+        if: steps.probe.outputs.has == 'true'
+        env:
+          BASE_URL: ${{ inputs.base_url || steps.local_start.outputs.url }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "::warning::Keine BASE_URL (weder vorgegeben noch lokal gestartet) - Stufe übersprungen."
+            exit 0
+          fi
+          cd qa-fabrik/tests && npm ci && npx playwright install --with-deps chromium
+          npx playwright test --config _shared/playwright.config.ts ticketwmc/ui
+
+      - name: Nichts generiert
+        if: steps.probe.outputs.has != 'true'
+        run: echo "::warning::Keine UI-Tests fuer dieses Repo generiert."
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.probe.outputs.has == 'true'
+        with:
+          name: qa-fabrik-test-report-ui
+          path: qa-fabrik/tests/playwright-report
+          retention-days: 7
