@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check for open PR and cancel
-        uses: actions/github-script@v6
+        uses: actions/github-script@v9
         with:
           script: |
             if (context.eventName !== 'push') {
@@ -54,7 +54,7 @@ jobs:
 
       - name: Decide preview deployment
         id: decide_preview
-        uses: actions/github-script@v6
+        uses: actions/github-script@v9
         with:
           script: |
             const eventName = context.eventName;
